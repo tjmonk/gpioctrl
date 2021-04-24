@@ -1,0 +1,36 @@
+{ "gpiodef" : [
+        { "chip" : "gpio1",
+          "lines" : [
+            {
+              "line" : "21",
+              "var" : "/HW/GPIO/USR0_LED",
+              "active_state" : "high",
+              "direction" : "output",
+              "drive" : "push-pull",
+              "bias" : "pull-up" },
+            {
+              "line" : "22",
+              "var" : "/HW/GPIO/USR1_LED",
+              "direction" : "output",
+              "active_state" : "high",
+              "drive" : "push-pull",
+              "bias" : "pull-up" },
+            {
+              "line" : "23",
+              "var" : "/HW/GPIO/USR2_LED",
+              "direction" : "output",
+              "active_state" : "high",
+              "drive" : "push-pull",
+              "bias" : "pull-up" },
+            {
+              "line" : "24",
+              "var" : "/HW/GPIO/USR3_LED",
+              "direction" : "output",
+              "active_state" : "high",
+              "drive" : "push-pull",
+              "bias" : "pull-up" }
+            ]
+        }
+    ]
+}
+
