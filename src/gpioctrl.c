@@ -33,7 +33,7 @@
                   "var" : "/HW/GPIO/0",
                   "active_state" : "low",
                   "direction" : "output",
-                  "drive" : "open_drain",
+                  "drive" : "open-drain",
                   "bias" : "pull-up" },
                 {
                   "line" : "1",
@@ -45,7 +45,7 @@
                   "line" : "2",
                   "var" : "/HW/GPIO/2",
                   "direction" : "input",
-                  "drive" : "push-pull",
+                  "drive" : "open-source",
                   "bias" : "pull-up" }
                 ]
             }
@@ -98,6 +98,9 @@ typedef struct _gpio
     /*! direction of the GPIO
         GPIOD_LINE_DIRECTION_INPUT or GPIOD_LINE_DIRECTION_OUTPUT */
     int direction;
+
+    /*! line request */
+    struct gpiod_line_request_config request;
 
     /*! pointer to the next GPIO variable */
 	struct _gpio *pNext;
@@ -155,7 +158,7 @@ typedef struct _gpioctrl_state
         Private file scoped variables
 ============================================================================*/
 
-/*! ExecVars State object */
+/*! GPIO Controller State object */
 GPIOCtrlState state;
 
 /*============================================================================
@@ -177,11 +180,18 @@ static GPIO *CreateLine( JNode *pNode, GPIOCtrlState *pState );
 static VAR_HANDLE GetVarHandle( VARSERVER_HANDLE hVarServer,
                                 JNode *pNode,
                                 char **ppName );
-static int ParseLineDirection( GPIO *pGPIO, JNode *pNode );
+static int ParseLineDirection( GPIO *pGPIO,
+                               JNode *pNode,
+                               GPIOCtrlState *pState );
+static int ParseLineActiveState( GPIO *pGPIO, JNode *pNode );
+static int ParseLineBias( GPIO *pGPIO, JNode *pNode );
+static int ParseLineDrive( GPIO *pGPIO, JNode *pNode );
 static GPIO *FindGPIO( GPIOCtrlState *pState, VAR_HANDLE hVar );
 static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int run( GPIOCtrlState *pState );
+static int RequestLine( GPIO *pGPIO );
+static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState );
 
 /*============================================================================
         Private function definitions
@@ -398,6 +408,7 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
     char *chipName;
     struct gpiod_chip *pChip;
     GPIOChip *pGPIOChip = NULL;
+    char buf[BUFSIZ];
 
     if ( ( pNode != NULL ) &&
          ( pState != NULL ) )
@@ -406,8 +417,11 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
         chipName = JSON_GetStr( pNode, "chip" );
         if ( chipName != NULL )
         {
+            /* build the chip name */
+            sprintf(buf, "/dev/%s", chipName );
+
             /* try to open the chip */
-            pChip = gpiod_chip_open_by_name( chipName );
+            pChip = gpiod_chip_open( buf );
             if ( pChip != NULL )
             {
                 /* allocate memory for the GPIOChip object */
@@ -435,7 +449,7 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
                 {
                     /* cloud not allocate memory for the GPIO Chip */
                     /* clean up resources used by the chip */
-                    gpiod_chip_close( pChip );
+                    gpiod_chip_unref( pChip );
                 }
 
             }
@@ -536,7 +550,7 @@ static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
             opaque pointer argument used for the gpioctrl state object
 
     @retval EOK - the chip object was parsed successfully
-    @retval EINVAL - the chipe object could not be parsed
+    @retval EINVAL - the chip object could not be parsed
 
 *//*
     REVISION HISTORY:
@@ -550,11 +564,6 @@ static int ParseLine( JNode *pNode, void *arg )
     int result = EINVAL;
     GPIOCtrlState *pState = (GPIOCtrlState *)arg;
     GPIO *pGPIO;
-    VAR_HANDLE hVar;
-
-    JNode *pAttribute;
-
-    JVar *pLineNumber;
 
     if ( ( pNode != NULL ) &&
          ( pState != NULL ) )
@@ -564,14 +573,127 @@ static int ParseLine( JNode *pNode, void *arg )
         if( pGPIO != NULL )
         {
             /* set the line direction */
-            ParseLineDirection( pGPIO, pNode );
+            ParseLineDirection( pGPIO, pNode, pState );
 
+            /* set the line active state */
+            ParseLineActiveState( pGPIO, pNode );
 
-            result = EOK;
+            /* set the line bias */
+            ParseLineBias( pGPIO, pNode );
+
+            /* set the line drive mode */
+            ParseLineDrive( pGPIO, pNode );
+
+            /* request (reserve) the line */
+            RequestLine( pGPIO );
+
+            /* set up the variable notification on the GPIO line */
+            SetupNotification( pGPIO, pState );
         }
     }
 
     return EOK;
+}
+
+/*============================================================================*/
+/*  RequestLine                                                               */
+/*!
+    Request the line from the gpiod library
+
+    The RequestLine function requests access to the line from the gpiod library
+    It sets up the gpio line direction, active state, bias, and drive mode,
+    as well as setting the value of the line if it is an output.
+
+    @param[in]
+       pGPIO
+            pointer to the GPIO line to request
+
+    @retval EOK the line was successfully requested
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int RequestLine( GPIO *pGPIO )
+{
+    int result = EINVAL;
+    int rc;
+
+    if ( pGPIO != NULL )
+    {
+        /* set the consumer name */
+        pGPIO->request.consumer = "gpioctrl";
+
+        /* perform the line request */
+        rc = gpiod_line_request( pGPIO->pLine, &pGPIO->request, pGPIO->value );
+        result = ( rc == -1 ) ? errno : EOK;
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  SetupNotification                                                         */
+/*!
+    Set up a variable server notification for the GPIO line
+
+    The SetupNotification function requests a notification from the variable
+    server for the variable associated with the specified GPIO line.
+
+    GPIO lines in INPUT mode will set up a CALC notification to force a query
+    of the input line when the variable is requested.
+
+    GPIO lines in OUTPUT mode will set up a MODIFIED notification to force
+    the output to be changed when the variable is modified.
+
+    It is assumed that the line direction has already been initialized when
+    this function is called.
+
+    @param[in]
+       pGPIO
+            pointer to the GPIO line to set up a notification for
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state which contains a handle
+            to the variable server for requesting the notification.
+
+    @retval EOK the notification was successfully requested
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState )
+{
+    int result = EINVAL;
+
+    if ( ( pGPIO != NULL ) &&
+         ( pState != NULL ) )
+    {
+        if( pGPIO->direction == GPIOD_LINE_DIRECTION_INPUT )
+        {
+            result = VAR_Notify( pState->hVarServer,
+                                 pGPIO->hVar,
+                                 NOTIFY_CALC );
+        }
+        else if ( pGPIO->direction == GPIOD_LINE_DIRECTION_OUTPUT )
+        {
+            result = VAR_Notify( pState->hVarServer,
+                                 pGPIO->hVar,
+                                 NOTIFY_MODIFIED );
+        }
+    }
+
+    return result;
 }
 
 /*============================================================================*/
@@ -762,6 +884,11 @@ static VAR_HANDLE GetVarHandle( VARSERVER_HANDLE hVarServer,
         pNode
             pointer to the line node to search for the "direction" attribute
 
+    @param[in]
+        pGPIOCtrlState
+            pointer to the GPIO controller state containing the handle to
+            the variable server to get the output value
+
     @retval EOK the line information object was obtained
     @retval ENOENT the line information was not found
     @retval EINVAL invalid arguments or incorrect JSON format
@@ -773,14 +900,16 @@ static VAR_HANDLE GetVarHandle( VARSERVER_HANDLE hVarServer,
         - created
 
 ==============================================================================*/
-static int ParseLineDirection( GPIO *pGPIO, JNode *pNode )
+static int ParseLineDirection( GPIO *pGPIO,
+                               JNode *pNode,
+                               GPIOCtrlState *pState )
 {
     int result = EINVAL;
     char *direction;
-    const char *consumer = "gpioctrl";
 
     if ( ( pGPIO != NULL ) &&
          ( pGPIO->pLine != NULL ) &&
+         ( pState != NULL ) &&
          ( pNode != NULL ) )
     {
         /* get the "direction" attribute from the GPIO line definition */
@@ -793,18 +922,258 @@ static int ParseLineDirection( GPIO *pGPIO, JNode *pNode )
         if ( strcmp( direction, "input" ) == 0 )
         {
             /* set the line to input */
-            result = gpiod_line_request_input( pGPIO->pLine, consumer );
+            pGPIO->direction = GPIOD_LINE_DIRECTION_INPUT;
+            pGPIO->request.request_type = GPIOD_LINE_REQUEST_DIRECTION_INPUT;
+            result = EOK;
         }
         else if( strcmp( direction, "output" ) == 0 )
         {
             /* set the line to "output" and set the default value */
-            result = gpiod_line_request_output( pGPIO->pLine,
-                                                consumer,
-                                                pGPIO->value );
+            pGPIO->direction = GPIOD_LINE_DIRECTION_OUTPUT;
+            pGPIO->request.request_type = GPIOD_LINE_REQUEST_DIRECTION_OUTPUT;
+            GetLineOutputValue( pState->hVarServer, pGPIO );
+            result = EOK;
         }
         else
         {
             result = ENOTSUP;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ParseLineActiveState                                                      */
+/*!
+    Parse the GPIO definition to set the active state for the GPIO line
+
+    The ParseLineActiveState function sets the active state for the
+    GPIO line object.
+
+    Two valid active state values are supported:  "low" and "high"
+
+    If the active state is not specified, it is assumed to be "high"
+
+    If an active state is specified, the JSON object is expected to have an
+    attribute key "active_state"
+
+    @param[in]
+        pGPIO
+            pointer to the GPIO object for the specified line
+
+    @param[in]
+        pNode
+            pointer to the line node to search for the "active_state" attribute
+
+    @retval EOK the line active state was set up
+    @retval ENOTSUP the specified line active state was not supported
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int ParseLineActiveState( GPIO *pGPIO, JNode *pNode )
+{
+    int result = EINVAL;
+    char *active_state;
+    const char *consumer = "gpioctrl";
+
+    if ( ( pGPIO != NULL ) &&
+         ( pNode != NULL ) )
+    {
+        /* indicate success */
+        result = EOK;
+
+        /* get the "active_state" attribute from the GPIO line definition */
+        active_state = JSON_GetStr( pNode, "active_state" );
+        if ( active_state != NULL )
+        {
+            if ( strcmp( active_state, "low" ) == 0 )
+            {
+                /* set the line to active low */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_ACTIVE_LOW;
+            }
+            else if ( strcmp( active_state, "high" ) == 0 )
+            {
+                /* set the line to active low */
+                pGPIO->request.flags &= ~GPIOD_LINE_REQUEST_FLAG_ACTIVE_LOW;
+            }
+            else
+            {
+                /* unsupported line active state */
+                result = ENOTSUP;
+            }
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ParseLineBias                                                             */
+/*!
+    Parse the GPIO definition to set the bias for the GPIO line
+
+    The ParseLineBias function sets the bias for the
+    GPIO line object.
+
+    Three valid bias state values are supported:
+        "disabled", "pull-down", "pull-up"
+
+    If the bias is not specified, it is assumed to be "disabled"
+
+    If a bias is specified, the JSON object is expected to have an
+    attribute key "bias"
+
+    @param[in]
+        pGPIO
+            pointer to the GPIO object for the specified line
+
+    @param[in]
+        pNode
+            pointer to the line node to search for the "bias" attribute
+
+    @retval EOK the line bias was set up
+    @retval ENOTSUP the specified line bias was not supported
+    @retval EINVAL invalid arguments or incorrect JSON format
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int ParseLineBias( GPIO *pGPIO, JNode *pNode )
+{
+    int result = EINVAL;
+    char *bias;
+
+    if ( ( pGPIO != NULL ) &&
+         ( pNode != NULL ) )
+    {
+        /* indicate success */
+        result = EOK;
+
+        /* get the "bias" attribute from the GPIO line definition */
+        bias = JSON_GetStr( pNode, "bias" );
+        if ( bias != NULL )
+        {
+            if ( strcmp( bias, "disabled" ) == 0 )
+            {
+                /* set the bias to disabled */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
+            }
+            else if ( strcmp( bias, "pull-down" ) == 0 )
+            {
+                /* set the bias to pull-down */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_DOWN;
+            }
+            else if ( strcmp( bias, "pull-up" ) == 0 )
+            {
+                /* set the bias to pull-up */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP;
+            }
+            else
+            {
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
+                result = ENOTSUP;
+            }
+        }
+        else
+        {
+            pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ParseLineDrive                                                            */
+/*!
+    Parse the GPIO definition to set the drive mode for the GPIO line
+
+    The ParseLineDrive function sets the drive mode for the GPIO line object.
+
+    Three valid drive mode values are supported:
+        "push-pull", "open-drain", "open-source"
+
+    If the drive mode is not specified, it is assumed to be "push-pull"
+
+    If a drive mode is specified, the JSON object is expected to have an
+    attribute key "drive"
+
+    @param[in]
+        pGPIO
+            pointer to the GPIO object for the specified line
+
+    @param[in]
+        pNode
+            pointer to the line node to search for the "drive" attribute
+
+    @retval EOK the line bias was set up
+    @retval ENOTSUP the specified line bias was not supported
+    @retval EINVAL invalid arguments or incorrect JSON format
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int ParseLineDrive( GPIO *pGPIO, JNode *pNode )
+{
+    int result = EINVAL;
+    char *drive;
+    int pushpull = ~( GPIOD_LINE_REQUEST_FLAG_OPEN_DRAIN |
+                      GPIOD_LINE_REQUEST_FLAG_OPEN_SOURCE );
+
+    if ( ( pGPIO != NULL ) &&
+         ( pNode != NULL ) )
+    {
+        /* indicate success */
+        result = EOK;
+
+        /* get the "drive" attribute from the GPIO line definition */
+        drive = JSON_GetStr( pNode, "drive" );
+        if ( drive != NULL )
+        {
+            if ( strcmp( drive, "push-pull" ) == 0 )
+            {
+                /* set the drive to push-pull by clearing the open-source
+                 * and open-drain bits */
+                pGPIO->request.flags &= pushpull;
+            }
+            else if ( strcmp( drive, "open-source" ) == 0 )
+            {
+                /* set the drive mode to open-source */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_OPEN_SOURCE;
+            }
+            else if ( strcmp( drive, "open-drain" ) == 0 )
+            {
+                /* set the drive mode to open-drain */
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_OPEN_DRAIN;
+            }
+            else
+            {
+                /* set the drive to push-pull by clearing the open-source
+                 * and open-drain bits */
+                pGPIO->request.flags &= pushpull;
+                result = ENOTSUP;
+            }
+        }
+        else
+        {
+            /* set the drive to push-pull by clearing the open-source
+             * and open-drain bits */
+            pGPIO->request.flags &= pushpull;
         }
     }
 
@@ -855,7 +1224,7 @@ static int GetLineOutputValue( VARSERVER_HANDLE hVarServer, GPIO *pGPIO )
          ( pGPIO->pLine != NULL ) )
     {
         /* get the line direction */
-        direction = gpiod_line_direction( pGPIO->pLine );
+        direction = pGPIO->direction;
         if ( direction == GPIOD_LINE_DIRECTION_OUTPUT )
         {
             /* get the variable value */
