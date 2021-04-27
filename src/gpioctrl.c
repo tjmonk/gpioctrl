@@ -89,6 +89,9 @@ typedef struct _gpio
     /*! handle to the variable */
 	VAR_HANDLE hVar;
 
+    /*! line number */
+    int line_num;
+
     /*! name of the variable */
 	char *name;
 
@@ -192,6 +195,9 @@ static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int run( GPIOCtrlState *pState );
 static int RequestLine( GPIO *pGPIO );
 static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState );
+static int SetupPrintNotifications( GPIOCtrlState *pState );
+static int PrintStatus( GPIOCtrlState *pState, int fd );
+static int PrintLineInfo( GPIOCtrlState *pState, GPIO *pGPIO, int fd );
 
 /*============================================================================
         Private function definitions
@@ -252,6 +258,7 @@ void main(int argc, char **argv)
     state.hVarServer = VARSERVER_Open();
     if( state.hVarServer != NULL )
     {
+        /* set up the print notifications */
         /* set up the file vars by iterating through the configuration array */
         JSON_Iterate( gpiodef, ParseChip, (void *)&state );
 
@@ -291,6 +298,7 @@ static int run( GPIOCtrlState *pState )
     int sig;
     int sigval;
     VAR_HANDLE hVar;
+    int fd = -1;
 
     if ( pState != NULL )
     {
@@ -312,6 +320,22 @@ static int run( GPIOCtrlState *pState )
             {
                 hVar = (VAR_HANDLE)sig;
                 UpdateInput( hVar, &state );
+            }
+            else if ( sig == SIG_VAR_PRINT )
+            {
+                /* open a print session */
+                VAR_OpenPrintSession( state.hVarServer,
+                                      sigval,
+                                      &hVar,
+                                      &fd );
+
+                /* print the file variable */
+                PrintStatus( &state, fd );
+
+                /* Close the print session */
+                VAR_ClosePrintSession( state.hVarServer,
+                                       sigval,
+                                       fd );
             }
         }
     }
@@ -637,6 +661,48 @@ static int RequestLine( GPIO *pGPIO )
 }
 
 /*============================================================================*/
+/*  SetupPrintNotifications                                                   */
+/*!
+    Set up a render notifications for the GPIO controller
+
+    The SetupPrintNotifications function sets up the render notifications
+    for the GPIO controller.
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state which contains a handle
+            to the variable server for requesting the notifications.
+
+    @retval EOK the notification was successfully requested
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    25-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int SetupPrintNotifications( GPIOCtrlState *pState )
+{
+    int result = EINVAL;
+    VAR_HANDLE hVar;
+
+    if ( pState != NULL )
+    {
+        hVar = VAR_FindByName( pState->hVarServer, "/SYS/GPIOCTRL/INFO" );
+        if( hVar != VAR_INVALID )
+        {
+            result = VAR_Notify( pState->hVarServer,
+                                 hVar,
+                                 NOTIFY_PRINT );
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
 /*  SetupNotification                                                         */
 /*!
     Set up a variable server notification for the GPIO line
@@ -780,6 +846,9 @@ static GPIO *CreateLine( JNode *pNode, GPIOCtrlState *pState )
 
                         /* store a pointer to the gpiod_line */
                         pGPIOLine->pLine = pLine;
+
+                        /* store the line number */
+                        pGPIOLine->line_num = line_num;
 
                         /* add the GPIO line to the line list */
                         if ( pGPIOChip->pLastLine == NULL )
@@ -1672,6 +1741,145 @@ static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState )
             /* variable not found */
             result = ENOENT;
         }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  PrintStatus                                                               */
+/*!
+    Print the GPIO controller status
+
+    The PrintStatus function iterates through the GPIO lines and
+    outputs a JSON object which lists the GPIO lines.
+
+@param[in]
+    pState
+        pointer to the GPIO controller state
+
+@param[in]
+    fd
+        output file descriptor
+
+@retval EOK the GPIO status was printed
+@retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    26-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int PrintStatus( GPIOCtrlState *pState, int fd )
+{
+    GPIOChip *pGPIOChip;
+    GPIO *pGPIO;
+    int result = EINVAL;
+
+    if ( ( pState != NULL ) &&
+         ( fd != -1 ) )
+    {
+        write( fd, "[", 1 );
+
+        /* start looking in the first GPIO chip */
+        pGPIOChip = pState->pFirstGPIOChip;
+        while ( pGPIOChip != NULL )
+        {
+            if( pGPIOChip != pState->pFirstGPIOChip )
+            {
+                write( fd, ",", 1 );
+            }
+
+            dprintf( fd, "{ \"chip\" : \"%s\", \"lines\" : [", pGPIO->name );
+
+            /* start looking in the first line of the chip */
+            pGPIO = pGPIOChip->pFirstLine;
+            while ( pGPIO != NULL )
+            {
+                if( pGPIO != pGPIOChip->pFirstLine )
+                {
+                    write( fd, ",", 1 );
+                }
+
+                /* print the line information */
+                PrintLineInfo( pState, pGPIO, fd );
+
+                /* move on to the next GPIO line */
+                pGPIO = pGPIO->pNext;
+            }
+
+            /* close the chip */
+            write( fd, "]}", 2 );
+
+            /* move to the next GPIO chip */
+            pGPIOChip = pGPIOChip->pNext;
+        }
+
+        write( fd, "]", 1 );
+
+        result = EOK;
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  PrintLineInfo                                                             */
+/*!
+    Print the GPIO line information
+
+    The PrintLineInfo function prints a JSON object containing the
+    GPIO line information
+
+@param[in]
+    pState
+        pointer to the GPIO controller state
+
+@param[in]
+    pGPIO
+        pointer to the GPIO object to print
+
+@param[in]
+    fd
+        output file descriptor
+
+@retval EOK the GPIO line information was printed
+@retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    26-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int PrintLineInfo( GPIOCtrlState *pState, GPIO *pGPIO, int fd )
+{
+    GPIOChip *pGPIOChip;
+    int result = EINVAL;
+    const char *line_name;
+
+    if ( ( pState != NULL ) &&
+         ( pGPIO != NULL ) &&
+         ( fd != -1 ) )
+    {
+        if ( pGPIO->pLine != NULL )
+        {
+            /* get the line name */
+            line_name = gpiod_line_name( pGPIO->pLine );
+
+            dprintf( fd,
+                     "{ \"line\" : %d, "
+                     "\"name\" : \"%s\", "
+                     "\"var\" : \"%s\"}",
+                     pGPIO->line_num,
+                     ( line_name != NULL ) ? line_name : "unknown",
+                     pGPIO->name);
+        }
+
+        result = EOK;
     }
 
     return result;
