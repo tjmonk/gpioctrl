@@ -1,0 +1,53 @@
+{
+    "type":"gpiovars",
+    "version":"1.0",
+    "description":"GPIO Vars",
+    "modified":"27-Apr-2021",
+    "vars":
+    [
+        {
+            "name":"/HW/GPIO/P16",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P16",
+            "description":"GPIO P16",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P17",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P17",
+            "description":"GPIO P17",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P18",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P18",
+            "description":"GPIO P16",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/SYS/GPIOCTRL/INFO",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"GPIO info",
+            "description":"GPIO information",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        }
+    ]
+}

@@ -1,0 +1,23 @@
+{ "gpiodef" : [
+        { "chip" : "gpiochip0",
+          "lines" : [
+            {
+              "line" : "16",
+              "var" : "/HW/GPIO/P16",
+              "active_state" : "high",
+              "direction" : "output"},
+            {
+              "line" : "17",
+              "var" : "/HW/GPIO/P17",
+              "active_state" : "high",
+              "direction" : "output"},
+            {
+              "line" : "18",
+              "var" : "/HW/GPIO/P18",
+              "active_state" : "high",
+              "direction" : "output"}
+            ]
+        }
+    ]
+}
+
