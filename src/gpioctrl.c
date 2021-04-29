@@ -198,6 +198,7 @@ static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState );
 static int SetupPrintNotifications( GPIOCtrlState *pState );
 static int PrintStatus( GPIOCtrlState *pState, int fd );
 static int PrintLineInfo( GPIOCtrlState *pState, GPIO *pGPIO, int fd );
+static void Shutdown( GPIOCtrlState *pState );
 
 /*============================================================================
         Private function definitions
@@ -251,6 +252,12 @@ void main(int argc, char **argv)
     /* process the input file */
     config = JSON_Process( state.pFileName );
 
+    if( state.verbose == true )
+    {
+	    JSON_Print(config, stdout, false );
+        printf("\n");
+    }
+
     /* get the configuration array */
     gpiodef = (JArray *)JSON_Find( config, "gpiodef" );
 
@@ -259,11 +266,16 @@ void main(int argc, char **argv)
     if( state.hVarServer != NULL )
     {
         /* set up the print notifications */
+        SetupPrintNotifications( &state );
+
         /* set up the file vars by iterating through the configuration array */
         JSON_Iterate( gpiodef, ParseChip, (void *)&state );
 
         /* run the GPIO controller */
         run( &state );
+
+        /* shut down the reserved GPIO lines */
+        Shutdown( &state );
 
         /* close the variable server */
         VARSERVER_Close( state.hVarServer );
@@ -377,18 +389,12 @@ static int ParseChip( JNode *pNode, void *arg )
 {
     int result = EINVAL;
     GPIOCtrlState *pState = (GPIOCtrlState *)arg;
-    char *chipName;
 
-    /* get the name of the chip we are creating */
-    chipName = JSON_GetStr( pNode, "chip" );
-    if( chipName != NULL )
+    /* create the GPIOChip object */
+    if( CreateChip( pNode, pState ) != NULL )
     {
-        /* create the GPIOChip object */
-        if( CreateChip( pNode, pState ) == EOK )
-        {
-            /* create the GPIO lines in the GPIOChip object */
-            result = CreateLines( pNode, pState );
-        }
+        /* create the GPIO lines in the GPIOChip object */
+        result = CreateLines( pNode, pState );
     }
 
     return result;
@@ -473,9 +479,13 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
                 {
                     /* cloud not allocate memory for the GPIO Chip */
                     /* clean up resources used by the chip */
-                    gpiod_chip_unref( pChip );
+                    gpiod_chip_close( pChip );
                 }
 
+            }
+            else
+            {
+                printf("unable to open chip: %s\n", buf );
             }
         }
     }
@@ -651,6 +661,7 @@ static int RequestLine( GPIO *pGPIO )
     {
         /* set the consumer name */
         pGPIO->request.consumer = "gpioctrl";
+        pGPIO->request.flags = 0;
 
         /* perform the line request */
         rc = gpiod_line_request( pGPIO->pLine, &pGPIO->request, pGPIO->value );
@@ -674,6 +685,7 @@ static int RequestLine( GPIO *pGPIO )
             to the variable server for requesting the notifications.
 
     @retval EOK the notification was successfully requested
+    @retval ENOENT the requested variable was not found
     @retval EINVAL invalid arguments
 
 *//*
@@ -696,6 +708,10 @@ static int SetupPrintNotifications( GPIOCtrlState *pState )
             result = VAR_Notify( pState->hVarServer,
                                  hVar,
                                  NOTIFY_PRINT );
+        }
+        else
+        {
+            result = ENOENT;
         }
     }
 
@@ -1136,7 +1152,7 @@ static int ParseLineBias( GPIO *pGPIO, JNode *pNode )
             if ( strcmp( bias, "disabled" ) == 0 )
             {
                 /* set the bias to disabled */
-                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
+                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLE;
             }
             else if ( strcmp( bias, "pull-down" ) == 0 )
             {
@@ -1150,13 +1166,8 @@ static int ParseLineBias( GPIO *pGPIO, JNode *pNode )
             }
             else
             {
-                pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
                 result = ENOTSUP;
             }
-        }
-        else
-        {
-            pGPIO->request.flags |= GPIOD_LINE_REQUEST_FLAG_BIAS_DISABLED;
         }
     }
 
@@ -1232,17 +1243,8 @@ static int ParseLineDrive( GPIO *pGPIO, JNode *pNode )
             }
             else
             {
-                /* set the drive to push-pull by clearing the open-source
-                 * and open-drain bits */
-                pGPIO->request.flags &= pushpull;
                 result = ENOTSUP;
             }
-        }
-        else
-        {
-            /* set the drive to push-pull by clearing the open-source
-             * and open-drain bits */
-            pGPIO->request.flags &= pushpull;
         }
     }
 
@@ -1551,15 +1553,17 @@ static void SetupTerminationHandler( void )
 *//*
     REVISION HISTORY:
 
-    Version: 1.0    12-Apr-2021     By: Trevor Monk
+    Version: 1.00    12-Apr-2021     By: Trevor Monk
         - created
+
+    Version: 1.01    28-Apr-2021     By: Trevor Monk
+        - Termination handler sets flag to abort execution.
 
 ==============================================================================*/
 static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
 {
-    syslog( LOG_ERR, "Abnormal termination of gpioctrl\n" );
-    VARSERVER_Close( state.hVarServer );
-    exit( 1 );
+    syslog( LOG_ERR, "termination of gpioctrl\n" );
+    state.running = false;
 }
 
 /*============================================================================*/
@@ -1792,7 +1796,7 @@ static int PrintStatus( GPIOCtrlState *pState, int fd )
                 write( fd, ",", 1 );
             }
 
-            dprintf( fd, "{ \"chip\" : \"%s\", \"lines\" : [", pGPIO->name );
+            dprintf(fd, "{ \"chip\" : \"%s\", \"lines\" : [", pGPIOChip->name);
 
             /* start looking in the first line of the chip */
             pGPIO = pGPIOChip->pFirstLine;
@@ -1883,6 +1887,72 @@ static int PrintLineInfo( GPIOCtrlState *pState, GPIO *pGPIO, int fd )
     }
 
     return result;
+}
+
+/*============================================================================*/
+/* Shutdown                                                                   */
+/*!
+    Shutdown the GPIO control service
+
+    The Shutdown service iterates through all of the GPIO resources
+    and closes and deallocates them.
+
+@param[in]
+    pState
+        pointer to the GPIO controller state
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    27-Apr-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static void Shutdown( GPIOCtrlState *pState )
+{
+    GPIOChip *pGPIOChip;
+    GPIOChip *pTempGPIOChip;
+    GPIO *pGPIO;
+    GPIO *pTempGPIO;
+
+    if ( pState != NULL )
+    {
+        /* start looking in the first GPIO chip */
+        pGPIOChip = pState->pFirstGPIOChip;
+        while ( pGPIOChip != NULL )
+        {
+            /* start looking in the first line of the chip */
+            pGPIO = pGPIOChip->pFirstLine;
+            while ( pGPIO != NULL )
+            {
+                pTempGPIO = pGPIO;
+
+                /* move on to the next GPIO line */
+                pGPIO = pGPIO->pNext;
+
+                if ( pTempGPIO->pLine != NULL )
+                {
+                    gpiod_line_release( pTempGPIO->pLine );
+                }
+
+                /* free the GPIO line object */
+                free( pTempGPIO );
+            }
+
+            pTempGPIOChip = pGPIOChip;
+
+            if( pTempGPIOChip->pChip != NULL )
+            {
+                gpiod_chip_close( pTempGPIOChip->pChip );
+            }
+
+            /* move to the next GPIO chip */
+            pGPIOChip = pGPIOChip->pNext;
+        }
+    }
+
+    pState->pFirstGPIOChip = NULL;
+    pState->pLastGPIOChip = NULL;
 }
 
 /*! @}
