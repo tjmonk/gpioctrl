@@ -234,6 +234,8 @@ void main(int argc, char **argv)
     JNode *config;
     JArray *gpiodef;
 
+    printf("Starting GPIOCtrl\n");
+
     /* clear the gpioctrl state object */
     memset( &state, 0, sizeof( state ) );
 
@@ -325,12 +327,12 @@ static int run( GPIOCtrlState *pState )
             if( sig == SIG_VAR_MODIFIED )
             {
                 /* get the handle of the variable which has changed */
-                hVar = (VAR_HANDLE)sig;
+                hVar = (VAR_HANDLE)sigval;
                 UpdateOutput( hVar, &state );
             }
             else if( sig == SIG_VAR_CALC )
             {
-                hVar = (VAR_HANDLE)sig;
+                hVar = (VAR_HANDLE)sigval;
                 UpdateInput( hVar, &state );
             }
             else if ( sig == SIG_VAR_PRINT )
@@ -487,6 +489,10 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
             {
                 printf("unable to open chip: %s\n", buf );
             }
+        }
+        else
+        {
+            printf("chip name is NULL\n");
         }
     }
 
@@ -885,7 +891,19 @@ static GPIO *CreateLine( JNode *pNode, GPIOCtrlState *pState )
                         gpiod_line_release( pLine );
                     }
                 }
+                else
+                {
+                    printf("failed to create line %d\n", line_num );
+                }
             }
+            else
+            {
+                printf("cannot get line\n");
+            }
+        }
+        else
+        {
+            printf("Unable to Get var handle\n");
         }
     }
 
