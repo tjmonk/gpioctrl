@@ -302,8 +302,11 @@ void main(int argc, char **argv)
 *//*
     REVISION HISTORY:
 
-    Version: 1.0    25-Apr-2021     By: Trevor Monk
+    Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
+
+    Version: 1.01    17-May-2021     By: Trevor Monk
+        - Replaced global state with local pState
 
 ============================================================================*/
 static int run( GPIOCtrlState *pState )
@@ -328,12 +331,12 @@ static int run( GPIOCtrlState *pState )
             {
                 /* get the handle of the variable which has changed */
                 hVar = (VAR_HANDLE)sigval;
-                UpdateOutput( hVar, &state );
+                UpdateOutput( hVar, pState );
             }
             else if( sig == SIG_VAR_CALC )
             {
                 hVar = (VAR_HANDLE)sigval;
-                UpdateInput( hVar, &state );
+                UpdateInput( hVar, pState);
             }
             else if ( sig == SIG_VAR_PRINT )
             {
@@ -344,7 +347,7 @@ static int run( GPIOCtrlState *pState )
                                       &fd );
 
                 /* print the file variable */
-                PrintStatus( &state, fd );
+                PrintStatus( pState, fd );
 
                 /* Close the print session */
                 VAR_ClosePrintSession( state.hVarServer,
@@ -531,8 +534,11 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
 *//*
     REVISION HISTORY:
 
-    Version: 1.0    25-Apr-2021     By: Trevor Monk
+    Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
+
+    Version: 1.01    17-May-2021     By: Trevor Monk
+        - Added missing return value
 
 ==============================================================================*/
 static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
@@ -562,6 +568,8 @@ static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
             }
         }
     }
+
+    return result;
 }
 
 /*============================================================================*/
@@ -1708,8 +1716,11 @@ static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState )
 *//*
     REVISION HISTORY:
 
-    Version: 1.0    25-Apr-2021     By: Trevor Monk
+    Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
+
+    Version: 1.01    17-May-2021     By: Trevor Monk
+        - Fixed incorrect type assignment and added missing length field
 
 ==============================================================================*/
 static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState )
@@ -1739,7 +1750,8 @@ static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState )
                 {
                     /* set the value of the variable */
                     var.val.ui = ( rc > 0 ) ? 1 : 0;
-                    var.type == VARTYPE_UINT16;
+                    var.type = VARTYPE_UINT16;
+                    var.len = sizeof(uint16_t);
 
                     /* write to the variable */
                     result = VAR_Set( pState->hVarServer,
