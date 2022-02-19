@@ -102,6 +102,13 @@ typedef struct _gpio
         GPIOD_LINE_DIRECTION_INPUT or GPIOD_LINE_DIRECTION_OUTPUT */
     int direction;
 
+    /*! event type.  one of:
+        0
+        GPIOD_LINE_REQUEST_EVENT_FALLING_EDGE
+        GPIOD_LINE_REQUEST_EVENT_RISING_EDGE
+        GPIOD_LINE_REQUEST_EVENT_BOTH_EDGES */
+    int event_type;
+
     /*! line request */
     struct gpiod_line_request_config request;
 
@@ -189,6 +196,7 @@ static int ParseLineDirection( GPIO *pGPIO,
 static int ParseLineActiveState( GPIO *pGPIO, JNode *pNode );
 static int ParseLineBias( GPIO *pGPIO, JNode *pNode );
 static int ParseLineDrive( GPIO *pGPIO, JNode *pNode );
+static int ParseLineEvent( GPIO *pGPIO, JNode *pNode );
 static GPIO *FindGPIO( GPIOCtrlState *pState, VAR_HANDLE hVar );
 static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState );
@@ -626,6 +634,9 @@ static int ParseLine( JNode *pNode, void *arg )
             /* set the line active state */
             ParseLineActiveState( pGPIO, pNode );
 
+            /* get the line event enable status */
+            ParseLineEvent( pGPIO, pNode );
+
             /* set the line bias */
             ParseLineBias( pGPIO, pNode );
 
@@ -662,8 +673,11 @@ static int ParseLine( JNode *pNode, void *arg )
 *//*
     REVISION HISTORY:
 
-    Version: 1.0    25-Apr-2021     By: Trevor Monk
+    Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
+
+    Version: 1.01    26-May-2021     By: Trevor Monk
+        - Add event type
 
 ==============================================================================*/
 static int RequestLine( GPIO *pGPIO )
@@ -676,6 +690,14 @@ static int RequestLine( GPIO *pGPIO )
         /* set the consumer name */
         pGPIO->request.consumer = "gpioctrl";
         pGPIO->request.flags = 0;
+
+        if( pGPIO->event_type != 0 )
+        {
+            /* if an event type is specified, we auomatically configure
+            the line as an input and set the request type to the specified
+            edge trigger */
+            pGPIO->request.request_type = pGPIO->event_type;
+        }
 
         /* perform the line request */
         rc = gpiod_line_request( pGPIO->pLine, &pGPIO->request, pGPIO->value );
@@ -1113,6 +1135,80 @@ static int ParseLineActiveState( GPIO *pGPIO, JNode *pNode )
             {
                 /* set the line to active low */
                 pGPIO->request.flags &= ~GPIOD_LINE_REQUEST_FLAG_ACTIVE_LOW;
+            }
+            else
+            {
+                /* unsupported line active state */
+                result = ENOTSUP;
+            }
+        }
+    }
+
+    return result;
+}
+
+/*============================================================================*/
+/*  ParseLineEvent                                                            */
+/*!
+    Parse the GPIO definition to see if the GPIO input generates an event
+
+    The ParseLineEvent function checks the event attribute to determine
+    if the GPIO input triggers an event on transition.
+
+    Two valid event state values are supported:  true and false
+
+    If the event state is not specified, it is assumed to be false
+
+    @param[in]
+        pGPIO
+            pointer to the GPIO object for the specified line
+
+    @param[in]
+        pNode
+            pointer to the line node to search for the "event" attribute
+
+    @retval EOK the line event state was set up
+    @retval ENOTSUP the specified line event state was not supported
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    26-May-2021     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int ParseLineEvent( GPIO *pGPIO, JNode *pNode )
+{
+    int result = EINVAL;
+    char *event_state;
+    int event_type;
+    const char *consumer = "gpioctrl";
+
+    if ( ( pGPIO != NULL ) &&
+         ( pNode != NULL ) )
+    {
+        /* indicate success */
+        result = EOK;
+
+        /* get the "active_state" attribute from the GPIO line definition */
+        event_state = JSON_GetStr( pNode, "event" );
+        if ( event_state != NULL )
+        {
+            if ( strcmp( event_state, "RISING_EDGE" ) == 0 )
+            {
+                /* event monitoring for rising edges */
+                pGPIO->event_type = GPIOD_LINE_REQUEST_EVENT_RISING_EDGE;
+            }
+            else if ( strcmp( event_state, "FALLING_EDGE" ) == 0 )
+            {
+                /* event monitoring for falling edges */
+                pGPIO->event_type = GPIOD_LINE_REQUEST_EVENT_FALLING_EDGE;
+            }
+            else if ( strcmp( event_state, "BOTH_EDGES") == 0 )
+            {
+                /* event monitoring for both edges */
+                pGPIO->event_type = GPIOD_LINE_REQUEST_EVENT_BOTH_EDGES;
             }
             else
             {
@@ -1815,7 +1911,7 @@ static int PrintStatus( GPIOCtrlState *pState, int fd )
     if ( ( pState != NULL ) &&
          ( fd != -1 ) )
     {
-        write( fd, "[", 1 );
+        (void)write( fd, "[", 1 );
 
         /* start looking in the first GPIO chip */
         pGPIOChip = pState->pFirstGPIOChip;
@@ -1823,7 +1919,7 @@ static int PrintStatus( GPIOCtrlState *pState, int fd )
         {
             if( pGPIOChip != pState->pFirstGPIOChip )
             {
-                write( fd, ",", 1 );
+                (void)write( fd, ",", 1 );
             }
 
             dprintf(fd, "{ \"chip\" : \"%s\", \"lines\" : [", pGPIOChip->name);
@@ -1834,7 +1930,7 @@ static int PrintStatus( GPIOCtrlState *pState, int fd )
             {
                 if( pGPIO != pGPIOChip->pFirstLine )
                 {
-                    write( fd, ",", 1 );
+                    (void)write( fd, ",", 1 );
                 }
 
                 /* print the line information */
@@ -1845,13 +1941,13 @@ static int PrintStatus( GPIOCtrlState *pState, int fd )
             }
 
             /* close the chip */
-            write( fd, "]}", 2 );
+            (void)write( fd, "]}", 2 );
 
             /* move to the next GPIO chip */
             pGPIOChip = pGPIOChip->pNext;
         }
 
-        write( fd, "]", 1 );
+        (void)write( fd, "]", 1 );
 
         result = EOK;
     }
