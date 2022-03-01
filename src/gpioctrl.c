@@ -141,6 +141,9 @@ typedef struct _gpio_chip
 /*! GPIO controller state */
 typedef struct _gpioctrl_state
 {
+    /*! operating mode */
+    bool gpiowatch;
+
     /*! variable server handle */
     VARSERVER_HANDLE hVarServer;
 
@@ -161,6 +164,9 @@ typedef struct _gpioctrl_state
 
     /*! pointer to the current gpiochip we are parsing */
     struct gpiod_chip *pChip;
+
+    /*! bulk lines array for event monitoring */
+    struct gpiod_line_bulk monitoredLines;
 
 } GPIOCtrlState;
 
@@ -198,9 +204,13 @@ static int ParseLineBias( GPIO *pGPIO, JNode *pNode );
 static int ParseLineDrive( GPIO *pGPIO, JNode *pNode );
 static int ParseLineEvent( GPIO *pGPIO, JNode *pNode );
 static GPIO *FindGPIO( GPIOCtrlState *pState, VAR_HANDLE hVar );
+static VAR_HANDLE FindVar( GPIOCtrlState *pState, struct gpiod_line *pLine );
 static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int UpdateInput( VAR_HANDLE hVar, GPIOCtrlState *pState );
 static int run( GPIOCtrlState *pState );
+static int WaitVarSignal( GPIOCtrlState *pState );
+static int WaitGPIOEvent( GPIOCtrlState *pState );
+static int HandleGPIOEvent( GPIOCtrlState *pState, struct gpiod_line *pLine );
 static int RequestLine( GPIO *pGPIO );
 static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState );
 static int SetupPrintNotifications( GPIOCtrlState *pState );
@@ -242,7 +252,7 @@ void main(int argc, char **argv)
     JNode *config;
     JArray *gpiodef;
 
-    printf("Starting GPIOCtrl\n");
+    printf("Starting %s\n", argv[0]);
 
     /* clear the gpioctrl state object */
     memset( &state, 0, sizeof( state ) );
@@ -251,6 +261,11 @@ void main(int argc, char **argv)
     {
         usage( argv[0] );
         exit( 1 );
+    }
+
+    if (strcmp( argv[0], "gpiowatch" ) == 0 )
+    {
+        state.gpiowatch = true;
     }
 
     /* set up an abnormal termination handler */
@@ -298,7 +313,11 @@ void main(int argc, char **argv)
     Run the GPIO controller
 
     The run function loops forever waiting for signals from the
-    variable server and acting on them.
+    variable server or events from the GPIO library and acting on them.
+    The operating mode (signals or events) is determined based on the
+    value of the gpiowatch variable:
+        true => wait gpio events
+        false => wait varserver signals
 
     @param[in]
         pState
@@ -316,14 +335,13 @@ void main(int argc, char **argv)
     Version: 1.01    17-May-2021     By: Trevor Monk
         - Replaced global state with local pState
 
+    Version: 1.02    28-Feb-2022     By: Trevor Monk
+        - Add support for handling gpio events
+
 ============================================================================*/
 static int run( GPIOCtrlState *pState )
 {
     int result = EINVAL;
-    int sig;
-    int sigval;
-    VAR_HANDLE hVar;
-    int fd = -1;
 
     if ( pState != NULL )
     {
@@ -333,35 +351,217 @@ static int run( GPIOCtrlState *pState )
 
         while( pState->running == true )
         {
-            /* wait for a signal from the variable server */
-            sig = VARSERVER_WaitSignal( &sigval );
-            if( sig == SIG_VAR_MODIFIED )
+            if( pState->gpiowatch == true )
             {
-                /* get the handle of the variable which has changed */
-                hVar = (VAR_HANDLE)sigval;
-                UpdateOutput( hVar, pState );
+                WaitGPIOEvent( pState );
             }
-            else if( sig == SIG_VAR_CALC )
+            else
             {
-                hVar = (VAR_HANDLE)sigval;
-                UpdateInput( hVar, pState);
+                WaitVarSignal( pState );
             }
-            else if ( sig == SIG_VAR_PRINT )
-            {
-                /* open a print session */
-                VAR_OpenPrintSession( state.hVarServer,
-                                      sigval,
-                                      &hVar,
-                                      &fd );
+        }
+    }
 
-                /* print the file variable */
-                PrintStatus( pState, fd );
+    return result;
+}
 
-                /* Close the print session */
-                VAR_ClosePrintSession( state.hVarServer,
-                                       sigval,
-                                       fd );
+/*==========================================================================*/
+/*  WaitGPIOEvent                                                           */
+/*!
+    Wait for GPIO events
+
+    The WaitGPIOEvent function waits for a GPIO rising or falling
+    edge event.
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state object
+
+    @retval EOK the event was handled successfully
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.00    28-Feb-2022     By: Trevor Monk
+        - created
+
+============================================================================*/
+static int WaitGPIOEvent( GPIOCtrlState *pState )
+{
+    int result = EINVAL;
+    int rc;
+    int i;
+    struct gpiod_line_bulk events;
+
+    if ( pState != NULL )
+    {
+        rc = gpiod_line_event_wait_bulk( &pState->monitoredLines,
+                                         NULL,
+                                         &events );
+        if ( rc < 0 )
+        {
+            result = errno;
+        }
+        else if ( rc > 0 )
+        {
+            for( i = 0; i < events.num_lines; i++ )
+            {
+                /* handle the line state update */
+                HandleGPIOEvent( pState, events.lines[i] );
             }
+        }
+    }
+
+    return result;
+}
+
+/*==========================================================================*/
+/*  HandleGPIOEvent                                                         */
+/*!
+    Handle a GPIO input event
+
+    The HandleGPIOEvent function processes a single gpio event
+    ( low to high, or high to low transition on an input pin )
+    The function searches for system variable that the line is
+    associated with, and sets its value to 0 or 1 depending on
+    if the transition was high to low, or low to high.
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state object
+
+    @param[in]
+        pLine
+            pointer to the gpiod_line object associated with the event
+
+    @retval EOK the event was handled successfully
+    @retval other error reported by VAR_Set()
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.00    28-Feb-2022     By: Trevor Monk
+        - created
+
+============================================================================*/
+static int HandleGPIOEvent( GPIOCtrlState *pState, struct gpiod_line *pLine )
+{
+    int result = EINVAL;
+    struct gpiod_line_event event;
+    VAR_HANDLE hVar;
+    VarObject var;
+    uint16_t val;
+
+    if ( ( pState != NULL ) &&
+         ( pLine != NULL ) )
+    {
+        /* determine the type of event that occurred */
+        if ( gpiod_line_event_read( pLine, &event ) == 0 )
+        {
+            val = ( event.event_type == GPIOD_LINE_EVENT_RISING_EDGE ) ? 1 : 0;
+
+            /* find the variable associated with the gpiod line */
+            hVar = FindVar( pState, pLine );
+            if ( hVar != VAR_INVALID )
+            {
+                /* set the value of the variable */
+                var.val.ui = val;
+                var.type = VARTYPE_UINT16;
+                var.len = sizeof(uint16_t);
+
+                /* write to the variable */
+                result = VAR_Set( pState->hVarServer,
+                                  hVar,
+                                  &var );
+            }
+            else
+            {
+                result = ENOENT;
+            }
+        }
+        else
+        {
+            result = EIO;
+        }
+    }
+
+    return result;
+}
+
+/*==========================================================================*/
+/*  WaitVarSignal                                                           */
+/*!
+    Wait for signals from the variable server
+
+    The WaitVarSignal function waits for a signal from the variable server
+    such as one of the following:
+        - SIG_VAR_MODIFIED
+        - SIG_VAR_CALC
+        - SIG_VAR_PRINT
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state object
+
+    @retval EOK the signal was handled successfully
+    @retval ENOTSUP the signal was not supported
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.00    28-Feb-2022     By: Trevor Monk
+        - created
+
+============================================================================*/
+static int WaitVarSignal( GPIOCtrlState *pState )
+{
+    int sig;
+    int sigval;
+    VAR_HANDLE hVar;
+    int fd = -1;
+    int result = EINVAL;
+
+    if ( pState != NULL )
+    {
+        /* wait for a signal from the variable server */
+        sig = VARSERVER_WaitSignal( &sigval );
+        if( sig == SIG_VAR_MODIFIED )
+        {
+            /* get the handle of the variable which has changed */
+            hVar = (VAR_HANDLE)sigval;
+            UpdateOutput( hVar, pState );
+            result = EOK;
+        }
+        else if( sig == SIG_VAR_CALC )
+        {
+            hVar = (VAR_HANDLE)sigval;
+            UpdateInput( hVar, pState);
+            result = EOK;
+        }
+        else if ( sig == SIG_VAR_PRINT )
+        {
+            /* open a print session */
+            VAR_OpenPrintSession( state.hVarServer,
+                                  sigval,
+                                  &hVar,
+                                  &fd );
+
+            /* print the file variable */
+            PrintStatus( pState, fd );
+
+            /* Close the print session */
+            VAR_ClosePrintSession( state.hVarServer,
+                                   sigval,
+                                   fd );
+
+            result = EOK;
+        }
+        else
+        {
+            result = ENOTSUP;
         }
     }
 
@@ -592,6 +792,7 @@ static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
     { "line": "<line number>",
       "var": "<variable name>",
       "active_state" : "<active state>",
+      "event": "<event_type>",
       "direction": "<direction>",
       "drive", "<drive type>",
       "bias", "<bias type>"
@@ -614,12 +815,16 @@ static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
     Version: 1.0    23-Apr-2021     By: Trevor Monk
         - created
 
+    Version: 1.01   28-Feb-2022     By: Trevor Monk
+        - track monitored lines using a gpiod_lines_bulk object
+
 ==============================================================================*/
 static int ParseLine( JNode *pNode, void *arg )
 {
     int result = EINVAL;
     GPIOCtrlState *pState = (GPIOCtrlState *)arg;
     GPIO *pGPIO;
+    int n;
 
     if ( ( pNode != NULL ) &&
          ( pState != NULL ) )
@@ -645,6 +850,17 @@ static int ParseLine( JNode *pNode, void *arg )
 
             /* request (reserve) the line */
             RequestLine( pGPIO );
+
+            /* track monitored events */
+            if ( pGPIO->event_type != 0 )
+            {
+                n = pState->monitoredLines.num_lines;
+                if ( n < GPIOD_LINE_BULK_MAX_LINES )
+                {
+                    pState->monitoredLines.lines[n] = pGPIO->pLine;
+                    pState->monitoredLines.num_lines++;
+                }
+            }
 
             /* set up the variable notification on the GPIO line */
             SetupNotification( pGPIO, pState );
@@ -675,9 +891,6 @@ static int ParseLine( JNode *pNode, void *arg )
 
     Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
-
-    Version: 1.01    26-May-2021     By: Trevor Monk
-        - Add event type
 
 ==============================================================================*/
 static int RequestLine( GPIO *pGPIO )
@@ -730,13 +943,17 @@ static int RequestLine( GPIO *pGPIO )
     Version: 1.0    25-Apr-2021     By: Trevor Monk
         - created
 
+    Version: 1.01   28-Feb-2022     By: Trevor Monk
+        - only set up notification if we are not in gpiowatch mode
+
 ==============================================================================*/
 static int SetupPrintNotifications( GPIOCtrlState *pState )
 {
     int result = EINVAL;
     VAR_HANDLE hVar;
 
-    if ( pState != NULL )
+    if ( ( pState != NULL ) &&
+         ( pState->gpiowatch == false ) )
     {
         hVar = VAR_FindByName( pState->hVarServer, "/SYS/GPIOCTRL/INFO" );
         if( hVar != VAR_INVALID )
@@ -789,15 +1006,21 @@ static int SetupPrintNotifications( GPIOCtrlState *pState )
     Version: 1.0    25-Apr-2021     By: Trevor Monk
         - created
 
+    Version: 1.01   28-Feb-2022     By: Trevor Monk
+        - only set up notification if we are not in gpiowatch mode
+        - only set up calc notifications for inputs that have no event type
+
 ==============================================================================*/
 static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState )
 {
     int result = EINVAL;
 
     if ( ( pGPIO != NULL ) &&
-         ( pState != NULL ) )
+         ( pState != NULL ) &&
+         ( pState->gpiowatch == false ) )
     {
-        if( pGPIO->direction == GPIOD_LINE_DIRECTION_INPUT )
+        if ( ( pGPIO->direction == GPIOD_LINE_DIRECTION_INPUT ) &&
+             ( pGPIO->event_type == 0 ) )
         {
             result = VAR_Notify( pState->hVarServer,
                                  pGPIO->hVar,
@@ -1519,6 +1742,73 @@ static GPIO *FindGPIO( GPIOCtrlState *pState, VAR_HANDLE hVar )
 
     /* return the found GPIO, or NULL if it is not found */
     return foundGPIO;
+}
+
+/*============================================================================*/
+/*  FindVar                                                                  */
+/*!
+    Find a Variable given a handle to its associated gpiod line
+
+    The FindVar function iterates through all of the GPIO chips looking
+    for the variable handle associated with the specified gpiod line
+
+    @param[in]
+        pState
+            pointer to the GPIOCtrl state which contains the list of
+            GPIO chips to search
+
+    @param[in]
+        pLine
+            pointer to the gpiod_line object to search for
+
+    @retval handle to the variable associated with the gpiod line
+    @retval VAR_INVALID if the variable could not be found
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    28-Feb-2022     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static VAR_HANDLE FindVar( GPIOCtrlState *pState, struct gpiod_line *pLine )
+{
+    VAR_HANDLE hVar = VAR_INVALID;
+    GPIOChip *pGPIOChip;
+    GPIO *pGPIO;
+    bool found = false;
+
+    if ( ( pState != NULL ) &&
+         ( pLine != NULL ) )
+    {
+        /* start looking in the first GPIO chip */
+        pGPIOChip = pState->pFirstGPIOChip;
+        while ( ( pGPIOChip != NULL ) && ( found == false ) )
+        {
+            /* start looking in the first line of the chip */
+            pGPIO = pGPIOChip->pFirstLine;
+            while( ( pGPIO != NULL ) && ( found == false ) )
+            {
+                /* check for a gpiod line match */
+                if( pGPIO->pLine == pLine )
+                {
+                    /* save the found GPIO variable */
+                    hVar = pGPIO->hVar;
+
+                    /* abort the search */
+                    found = true;
+                }
+
+                /* move on to the next GPIO line */
+                pGPIO = pGPIO->pNext;
+            }
+
+            /* move to the next GPIO chip */
+            pGPIOChip = pGPIOChip->pNext;
+        }
+    }
+
+    return hVar;
 }
 
 /*==========================================================================*/
