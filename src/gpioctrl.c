@@ -141,6 +141,9 @@ typedef struct _gpio_chip
 /*! GPIO controller state */
 typedef struct _gpioctrl_state
 {
+    /*! service name */
+    char *service;
+
     /*! operating mode */
     bool gpiowatch;
 
@@ -211,7 +214,7 @@ static int run( GPIOCtrlState *pState );
 static int WaitVarSignal( GPIOCtrlState *pState );
 static int WaitGPIOEvent( GPIOCtrlState *pState );
 static int HandleGPIOEvent( GPIOCtrlState *pState, struct gpiod_line *pLine );
-static int RequestLine( GPIO *pGPIO );
+static int RequestLine( GPIO *pGPIO, GPIOCtrlState *pState );
 static int SetupNotification( GPIO *pGPIO, GPIOCtrlState *pState );
 static int SetupPrintNotifications( GPIOCtrlState *pState );
 static int PrintStatus( GPIOCtrlState *pState, int fd );
@@ -263,7 +266,9 @@ void main(int argc, char **argv)
         exit( 1 );
     }
 
-    if (strcmp( argv[0], "gpiowatch" ) == 0 )
+    state.service = strdup( argv[0] );
+
+    if (strcmp( state.service, "gpiowatch" ) == 0 )
     {
         state.gpiowatch = true;
     }
@@ -849,7 +854,7 @@ static int ParseLine( JNode *pNode, void *arg )
             ParseLineDrive( pGPIO, pNode );
 
             /* request (reserve) the line */
-            RequestLine( pGPIO );
+            RequestLine( pGPIO, pState );
 
             /* track monitored events */
             if ( pGPIO->event_type != 0 )
@@ -883,6 +888,10 @@ static int ParseLine( JNode *pNode, void *arg )
        pGPIO
             pointer to the GPIO line to request
 
+    @param[in]
+        pState
+            pointer to the gpioctrl state object
+
     @retval EOK the line was successfully requested
     @retval EINVAL invalid arguments
 
@@ -893,15 +902,18 @@ static int ParseLine( JNode *pNode, void *arg )
         - created
 
 ==============================================================================*/
-static int RequestLine( GPIO *pGPIO )
+static int RequestLine( GPIO *pGPIO, GPIOCtrlState *pState )
 {
     int result = EINVAL;
     int rc;
+    bool request = false;
 
-    if ( pGPIO != NULL )
+    if ( ( pGPIO != NULL ) &&
+         ( pState != NULL ) &&
+         ( pState->service != NULL ) )
     {
         /* set the consumer name */
-        pGPIO->request.consumer = "gpioctrl";
+        pGPIO->request.consumer = pState->service;
         pGPIO->request.flags = 0;
 
         if( pGPIO->event_type != 0 )
@@ -913,8 +925,21 @@ static int RequestLine( GPIO *pGPIO )
         }
 
         /* perform the line request */
-        rc = gpiod_line_request( pGPIO->pLine, &pGPIO->request, pGPIO->value );
-        result = ( rc == -1 ) ? errno : EOK;
+        request = (((pState->gpiowatch == true) && (pGPIO->event_type != 0)) ||
+                   ((pState->gpiowatch == false) && (pGPIO->event_type == 0)));
+
+        if ( request == true )
+        {
+            rc = gpiod_line_request( pGPIO->pLine,
+                                     &pGPIO->request,
+                                     pGPIO->value );
+
+            result = ( rc == -1 ) ? errno : EOK;
+        }
+        else
+        {
+            result = EOK;
+        }
     }
 
     return result;
@@ -1436,8 +1461,13 @@ static int ParseLineEvent( GPIO *pGPIO, JNode *pNode )
             else
             {
                 /* unsupported line active state */
+                pGPIO->event_type = 0;
                 result = ENOTSUP;
             }
+        }
+        else
+        {
+            pGPIO->event_type = 0;
         }
     }
 
@@ -2037,7 +2067,7 @@ static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState )
                 {
                     if ( var.type == VARTYPE_UINT16 )
                     {
-                        /* get the value to write to the output */
+                      /* get the value to write to the output */
                         pGPIO->value = ( var.val.ui > 0 ) ? 1 : 0;
 
                         /* set the output value to the hardware */
@@ -2046,6 +2076,13 @@ static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState )
 
                         /* check the result */
                         result = ( rc == EOK ) ? EOK : errno;
+                        if( result != EOK )
+                        {
+                            syslog( LOG_ERR, "UpdateOutput: %d %s",
+                                    result,
+                                    strerror(result) );
+                        }
+                        result = EOK;
                     }
                     else
                     {
