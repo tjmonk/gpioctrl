@@ -2545,23 +2545,22 @@ static void *PWMThread( void *arg )
                 pGPIO->value = 255;
             }
 
-            /* set the output value to the hardware */
-            gpiod_line_set_value( pGPIO->pLine, 1 );
-
             /* sleep until it is tim to turn the output off */
             t = ( pGPIO->value * 40 );
             if ( t > 0 )
             {
+                /* set the output value to the hardware */
+                gpiod_line_set_value( pGPIO->pLine, 1 );
                 usleep( t );
             }
 
-            /* set the output value to the hardware */
-            gpiod_line_set_value( pGPIO->pLine, 0 );
 
             /* sleep until it is time to turn the output on */
             t = ( ( 255 - pGPIO->value ) * 40 );
             if ( t > 0 )
             {
+                /* set the output value to the hardware */
+                gpiod_line_set_value( pGPIO->pLine, 0 );
                 usleep ( t );
             }
         }
