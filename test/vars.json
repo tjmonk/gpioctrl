@@ -6,6 +6,61 @@
     "vars":
     [
         {
+            "name":"/HW/GPIO/P4",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P4",
+            "description":"GPIO P4",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P5",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P5",
+            "description":"GPIO P5",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P6",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P6",
+            "description":"GPIO P6",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P12",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P12",
+            "description":"GPIO P12",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P13",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P13",
+            "description":"GPIO P13",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
             "name":"/HW/GPIO/P16",
             "type":"uint16",
             "value":"0",
@@ -33,7 +88,106 @@
             "value":"0",
             "fmt":"%d",
             "shortname":"P18",
-            "description":"GPIO P16",
+            "description":"GPIO P18",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P19",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P19",
+            "description":"GPIO P19",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P20",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P20",
+            "description":"GPIO P20",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P21",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P21",
+            "description":"GPIO P21",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P22",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P22",
+            "description":"GPIO P22",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P23",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P23",
+            "description":"GPIO P23",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P24",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P24",
+            "description":"GPIO P24",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P25",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P25",
+            "description":"GPIO P25",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P26",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P26",
+            "description":"GPIO P26",
+            "flags":"volatile",
+            "read":"1000,1001",
+            "write":"1000"
+        },
+        {
+            "name":"/HW/GPIO/P27",
+            "type":"uint16",
+            "value":"0",
+            "fmt":"%d",
+            "shortname":"P27",
+            "description":"GPIO P27",
             "flags":"volatile",
             "read":"1000,1001",
             "write":"1000"

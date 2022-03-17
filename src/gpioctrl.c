@@ -71,6 +71,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <syslog.h>
+#include <pthread.h>
 #include <varserver/varserver.h>
 #include <tjson/json.h>
 #include <gpiod.h>
@@ -101,6 +102,9 @@ typedef struct _gpio
     /*! direction of the GPIO
         GPIOD_LINE_DIRECTION_INPUT or GPIOD_LINE_DIRECTION_OUTPUT */
     int direction;
+
+    /*! software PWM output */
+    bool PWM;
 
     /*! event type.  one of:
         0
@@ -220,6 +224,8 @@ static int SetupPrintNotifications( GPIOCtrlState *pState );
 static int PrintStatus( GPIOCtrlState *pState, int fd );
 static int PrintLineInfo( GPIOCtrlState *pState, GPIO *pGPIO, int fd );
 static void Shutdown( GPIOCtrlState *pState );
+static int CreatePWM( GPIO *pGPIO );
+static void *PWMThread( void *arg );
 
 /*============================================================================
         Private function definitions
@@ -823,6 +829,9 @@ static int CreateLines( JNode *pNode, GPIOCtrlState *pState )
     Version: 1.01   28-Feb-2022     By: Trevor Monk
         - track monitored lines using a gpiod_lines_bulk object
 
+    Version: 1.02   16-Mar-2022     By: Trevor Monk
+        - Add software PWM
+
 ==============================================================================*/
 static int ParseLine( JNode *pNode, void *arg )
 {
@@ -869,6 +878,13 @@ static int ParseLine( JNode *pNode, void *arg )
 
             /* set up the variable notification on the GPIO line */
             SetupNotification( pGPIO, pState );
+
+            /* create a software PWM if applicable */
+            if ( ( pState->gpiowatch == false ) &&
+                 ( pGPIO->PWM == true ) )
+            {
+                CreatePWM( pGPIO );
+            }
         }
     }
 
@@ -901,12 +917,16 @@ static int ParseLine( JNode *pNode, void *arg )
     Version: 1.00    25-Apr-2021     By: Trevor Monk
         - created
 
+    Version: 1.01    16-Mar-2022     By: Trevor Monk
+        - Set initial value for software PWM lines
+
 ==============================================================================*/
 static int RequestLine( GPIO *pGPIO, GPIOCtrlState *pState )
 {
     int result = EINVAL;
     int rc;
     bool request = false;
+    int value;
 
     if ( ( pGPIO != NULL ) &&
          ( pState != NULL ) &&
@@ -930,9 +950,17 @@ static int RequestLine( GPIO *pGPIO, GPIOCtrlState *pState )
 
         if ( request == true )
         {
+            value = pGPIO->value;
+
+            if( pGPIO->PWM == true )
+            {
+                /* initial value for sofware PWM lines is 0 */
+                value = 0;
+            }
+
             rc = gpiod_line_request( pGPIO->pLine,
                                      &pGPIO->request,
-                                     pGPIO->value );
+                                     value );
 
             result = ( rc == -1 ) ? errno : EOK;
         }
@@ -1310,6 +1338,15 @@ static int ParseLineDirection( GPIO *pGPIO,
         else if( strcmp( direction, "output" ) == 0 )
         {
             /* set the line to "output" and set the default value */
+            pGPIO->direction = GPIOD_LINE_DIRECTION_OUTPUT;
+            pGPIO->request.request_type = GPIOD_LINE_REQUEST_DIRECTION_OUTPUT;
+            GetLineOutputValue( pState->hVarServer, pGPIO );
+            result = EOK;
+        }
+        else if( strcmp( direction, "pwm" ) == 0 )
+        {
+            /* set the line to "output" and set the default value */
+            pGPIO->PWM = true;
             pGPIO->direction = GPIOD_LINE_DIRECTION_OUTPUT;
             pGPIO->request.request_type = GPIOD_LINE_REQUEST_DIRECTION_OUTPUT;
             GetLineOutputValue( pState->hVarServer, pGPIO );
@@ -2038,6 +2075,9 @@ static void TerminationHandler( int signum, siginfo_t *info, void *ptr )
     Version: 1.0    25-Apr-2021     By: Trevor Monk
         - created
 
+    Version: 1.01   16-Mar-2022     By: Trevor Monk
+        - Add support for PWM outputs
+
 ==============================================================================*/
 static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState )
 {
@@ -2067,22 +2107,30 @@ static int UpdateOutput( VAR_HANDLE hVar, GPIOCtrlState *pState )
                 {
                     if ( var.type == VARTYPE_UINT16 )
                     {
-                      /* get the value to write to the output */
-                        pGPIO->value = ( var.val.ui > 0 ) ? 1 : 0;
-
-                        /* set the output value to the hardware */
-                        rc = gpiod_line_set_value( pGPIO->pLine,
-                                                   pGPIO->value );
-
-                        /* check the result */
-                        result = ( rc == EOK ) ? EOK : errno;
-                        if( result != EOK )
+                        if( pGPIO->PWM == true )
                         {
-                            syslog( LOG_ERR, "UpdateOutput: %d %s",
-                                    result,
-                                    strerror(result) );
+                            pGPIO->value = ( var.val.ui <= 255  ) ? var.val.ui
+                                                                  : 255;
                         }
-                        result = EOK;
+                        else
+                        {
+                            /* get the value to write to the output */
+                            pGPIO->value = ( var.val.ui > 0 ) ? 1 : 0;
+
+                            /* set the output value to the hardware */
+                            rc = gpiod_line_set_value( pGPIO->pLine,
+                                                       pGPIO->value );
+
+                            /* check the result */
+                            result = ( rc == EOK ) ? EOK : errno;
+                            if( result != EOK )
+                            {
+                                syslog( LOG_ERR, "UpdateOutput: %d %s",
+                                        result,
+                                        strerror(result) );
+                            }
+                            result = EOK;
+                        }
                     }
                     else
                     {
@@ -2407,6 +2455,120 @@ static void Shutdown( GPIOCtrlState *pState )
     pState->pFirstGPIOChip = NULL;
     pState->pLastGPIOChip = NULL;
 }
+
+/*============================================================================*/
+/*  CreatePWM                                                                 */
+/*!
+    Create an output PWM thread
+
+    The CreatePWM thread creates a thread for controlling a software PWM
+    pin.  This is highly inefficient and not recommended for a large
+    number of GPIO pins, but may be used in a pinch if you have CPU
+    cycles to burn.
+
+@param[in]
+    pGPIO
+        pointer to the GPIO pin to create a PWM thread for
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    16-Mar-2022     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static int CreatePWM( GPIO *pGPIO )
+{
+    int result = EINVAL;
+    pthread_attr_t attr;
+    pthread_t thread;
+
+    if( pGPIO != NULL )
+    {
+        result = pthread_attr_init( &attr );
+
+        result = pthread_create( &thread, NULL, PWMThread, (void *)pGPIO );
+        pthread_attr_destroy( &attr );
+    }
+}
+
+/*============================================================================*/
+/*  PWM Thread                                                                */
+/*!
+    PWM Thread
+
+    The PWM thread is associated with a single GPIO pin.  It toggles
+    the GPIO pin on and off with ~ 100Hz frequency.  The value assigned
+    to the PWM pin controls the duty cycle within the range [0.255]
+    For example, setting the pin's value to 128 will set ~50% duty
+    cycle.
+
+@param[in]
+    pGPIO
+        pointer to the GPIO pin to control as a PWM output
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    16-Mar-2022     By: Trevor Monk
+        - created
+
+==============================================================================*/
+static void *PWMThread( void *arg )
+{
+    GPIO *pGPIO = (GPIO *)arg;
+    int t;
+    sigset_t mask;
+
+    /* block real time signals on this thread */
+    sigemptyset( &mask );
+    sigaddset( &mask, SIG_VAR_MODIFIED );
+    sigaddset( &mask, SIG_VAR_CALC );
+    sigaddset( &mask, SIG_VAR_PRINT );
+    sigaddset( &mask, SIG_VAR_VALIDATE );
+    sigprocmask( SIG_BLOCK, &mask, NULL );
+
+    if( pGPIO != NULL )
+    {
+        /* repeat forever */
+        while ( 1 )
+        {
+
+            /* limit the value to [0.255] */
+            if ( pGPIO->value < 0 )
+            {
+                pGPIO->value = 0;
+            }
+
+            if ( pGPIO->value > 255 )
+            {
+                pGPIO->value = 255;
+            }
+
+            /* set the output value to the hardware */
+            gpiod_line_set_value( pGPIO->pLine, 1 );
+
+            /* sleep until it is tim to turn the output off */
+            t = ( pGPIO->value * 40 );
+            if ( t > 0 )
+            {
+                usleep( t );
+            }
+
+            /* set the output value to the hardware */
+            gpiod_line_set_value( pGPIO->pLine, 0 );
+
+            /* sleep until it is time to turn the output on */
+            t = ( ( 255 - pGPIO->value ) * 40 );
+            if ( t > 0 )
+            {
+                usleep ( t );
+            }
+        }
+    }
+}
+
+
 
 /*! @}
  * end of gpioctrl group */

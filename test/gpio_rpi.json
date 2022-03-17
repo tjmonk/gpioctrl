@@ -10,12 +10,12 @@
               "line" : "5",
               "var" : "/HW/GPIO/P5",
               "active_state" : "high",
-              "direction" : "output"},
+              "direction" : "pwm"},
             {
               "line" : "6",
               "var" : "/HW/GPIO/P6",
               "active_state" : "high",
-              "direction" : "output"},
+              "direction" : "pwm"},
             {
               "line" : "12",
               "var" : "/HW/GPIO/P12",
@@ -25,7 +25,7 @@
               "line" : "13",
               "var" : "/HW/GPIO/P13",
               "active_state" : "high",
-              "direction" : "output"},
+              "direction" : "pwm"},
             {
               "line" : "16",
               "var" : "/HW/GPIO/P16",
@@ -50,7 +50,7 @@
               "line" : "20",
               "var" : "/HW/GPIO/P20",
               "active_state" : "high",
-              "direction" : "output"},
+              "direction" : "pwm"},
             {
               "line" : "21",
               "var" : "/HW/GPIO/P21",
