@@ -1,0 +1,95 @@
+{ "gpiodef" : [
+    { "chip" : "gpiochip0",
+      "lines" : [
+        {
+          "line" : "4",
+          "var" : "/HW/GPIO/P4",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "5",
+          "var" : "/HW/GPIO/P5",
+          "active_state" : "high",
+          "direction" : "pwm"},
+        {
+          "line" : "6",
+          "var" : "/HW/GPIO/P6",
+          "active_state" : "high",
+          "direction" : "pwm"},
+        {
+          "line" : "12",
+          "var" : "/HW/GPIO/P12",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "13",
+          "var" : "/HW/GPIO/P13",
+          "active_state" : "high",
+          "direction" : "pwm"},
+        {
+          "line" : "16",
+          "var" : "/HW/GPIO/P16",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "17",
+          "var" : "/HW/GPIO/P17",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "18",
+          "var" : "/HW/GPIO/P18",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "19",
+          "var" : "/HW/GPIO/P19",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "20",
+          "var" : "/HW/GPIO/P20",
+          "active_state" : "high",
+          "direction" : "pwm"},
+        {
+          "line" : "21",
+          "var" : "/HW/GPIO/P21",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "22",
+          "var" : "/HW/GPIO/P22",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "23",
+          "var" : "/HW/GPIO/P23",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "24",
+          "var" : "/HW/GPIO/P24",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "25",
+          "var" : "/HW/GPIO/P25",
+          "active_state" : "high",
+          "direction" : "output"},
+        {
+          "line" : "26",
+          "var" : "/HW/GPIO/P26",
+          "event" : "BOTH_EDGES",
+          "direction" : "input",
+          "drive" : "open-source",
+          "bias" : "pull-up" },
+        {
+          "line" : "27",
+          "var" : "/HW/GPIO/P27",
+          "active_state" : "high",
+          "direction" : "output"}
+        ]
+    }
+]
+}
+
