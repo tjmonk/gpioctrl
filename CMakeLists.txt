@@ -7,8 +7,6 @@ project(gpioctrl
     DESCRIPTION "Server to interface system variables to GPIO ports"
 )
 
-find_library( LIB_VARSERVER varserver REQUIRED )
-find_library( LIB_TJSON tjson REQUIRED )
 find_library( LIB_GPIOD gpiod REQUIRED )
 
 add_executable( ${PROJECT_NAME}
@@ -23,8 +21,8 @@ target_link_libraries( ${PROJECT_NAME}
 	${CMAKE_THREAD_LIBS_INIT}
 	rt
     pthread
-	${LIB_VARSERVER}
-    ${LIB_TJSON}
+	varserver
+    tjson
     ${LIB_GPIOD}
 )
 
