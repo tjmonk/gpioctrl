@@ -1,8 +1,10 @@
 INCLUDE_DIRS=-I../libvarserver/inc \
 			 -I../libjson/inc \
-			 -I./inc
+			 -I./inc \
+			 $(shell pkg-config --cflags libgpiod)
 
 LIB_DIRS=../libvarserver/ ../libjson/
+GPIOD_LIBS=$(shell pkg-config --libs libgpiod)
 
 all: docs gpioctrl
 
@@ -18,7 +20,7 @@ docs: gpioctrl
 	cd doc/latex && make
 
 gpioctrl: gpioctrl.o
-	gcc gpioctrl.o -L ${LIB_DIRS} -lvarserver -lrt -lpthread -ltjson -lgpiod -o gpioctrl
+	gcc gpioctrl.o -L ${LIB_DIRS} -lvarserver -lrt -lpthread -ltjson ${GPIOD_LIBS} -o gpioctrl
 
 gpioctrl.o: src/gpioctrl.c
 	gcc -c ${INCLUDE_DIRS} src/gpioctrl.c -o gpioctrl.o
