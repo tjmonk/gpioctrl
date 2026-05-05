@@ -21,7 +21,6 @@
     Input/Output pins on the device using a JSON object definition to
     describe the mapping
 
-
     Variables and their GPIO mappings are defined in
     a JSON array as follows:
 
@@ -114,10 +113,13 @@ typedef struct _gpio
     /*! edge detection when edge_configured (libgpiod v2 ::gpiod_line_edge) */
     enum gpiod_line_edge line_edge;
 
+    /*! true if the line is active-low */
     bool active_low;
 
+    /*! line bias setting (libgpiod v2 ::gpiod_line_bias) */
     enum gpiod_line_bias line_bias;
 
+    /*! line drive setting (libgpiod v2 ::gpiod_line_drive) */
     enum gpiod_line_drive line_drive;
 
     /*! line included in gpiod_chip_request_lines for this chip */
@@ -139,7 +141,8 @@ typedef struct _gpio_chip
     /*! pointer to the libgpiod gpiod_chip structure */
     struct gpiod_chip *pChip;
 
-    /*! single request for all kernel-requested offsets on this chip (libgpiod v2) */
+    /*! single request for all kernel-requested offsets
+     *  on this chip (libgpiod v2) */
     struct gpiod_line_request *pLineRequest;
 
     /*! pointer to the first line in the GPIO chip */
@@ -198,8 +201,10 @@ GPIOCtrlState state;
 int main(int argc, char **argv);
 static int ProcessOptions( int argC, char *argV[], GPIOCtrlState *pState );
 static void usage( char *cmdname );
-static bool GPIOShouldRequest( const GPIO *pGPIO, const GPIOCtrlState *pState );
-static int FinalizeChipGPIORequest( GPIOChip *pGPIOChip, GPIOCtrlState *pState );
+static bool GPIOShouldRequest( const GPIO *pGPIO,
+                               const GPIOCtrlState *pState );
+static int FinalizeChipGPIORequest( GPIOChip *pGPIOChip,
+                                    GPIOCtrlState *pState );
 static bool ChipParticipatesInEdgePoll( const GPIOChip *pChip,
 					const GPIOCtrlState *pState );
 static int ParseChip( JNode *pNode, void *arg );
@@ -244,60 +249,249 @@ static void *PWMThread( void *arg );
         Private function definitions
 ============================================================================*/
 
+/*==========================================================================*/
+/*  GPIOShouldRequest                                                       */
+/*!
+    Determine if a GPIO line should be included in the kernel request
+
+    The GPIOShouldRequest function determines whether a given GPIO
+    line should be included in the chip-level kernel line request.
+    In gpiowatch mode, only edge-configured lines are requested.
+    In normal mode, only non-edge lines are requested.
+
+    @param[in]
+        pGPIO
+            pointer to the GPIO line to evaluate
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state
+
+    @retval true the line should be included in the request
+    @retval false the line should not be included
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    30-Apr-2026     By: Trevor Monk
+        - created for libgpiod v2 migration
+
+============================================================================*/
 static bool GPIOShouldRequest( const GPIO *pGPIO, const GPIOCtrlState *pState )
 {
-	if ( pGPIO == NULL || pState == NULL )
+	bool result = false;
+
+	if ( ( pGPIO != NULL ) && ( pState != NULL ) )
 	{
-		return false;
+		result = ( ( pState->gpiowatch == true ) &&
+		           ( pGPIO->edge_configured == true ) ) ||
+		         ( ( pState->gpiowatch == false ) &&
+		           ( pGPIO->edge_configured == false ) );
 	}
 
-	return ( ( pState->gpiowatch == true ) && ( pGPIO->edge_configured == true ) ) ||
-	       ( ( pState->gpiowatch == false ) && ( pGPIO->edge_configured == false ) );
+	return result;
 }
 
+/*==========================================================================*/
+/*  ChipParticipatesInEdgePoll                                              */
+/*!
+    Determine if a chip has edge-monitored lines for polling
+
+    The ChipParticipatesInEdgePoll function checks whether the
+    specified GPIO chip has at least one line that is both included
+    in the kernel request and configured for edge detection.  This
+    is used to decide which chips to include in the poll() call
+    when waiting for GPIO edge events.
+
+    @param[in]
+        pChip
+            pointer to the GPIO chip to evaluate
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state
+
+    @retval true the chip has edge-monitored lines
+    @retval false the chip does not participate in edge poll
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    30-Apr-2026     By: Trevor Monk
+        - created for libgpiod v2 migration
+
+============================================================================*/
 static bool ChipParticipatesInEdgePoll( const GPIOChip *pChip,
 					const GPIOCtrlState *pState )
 {
 	const GPIO *pGPIO;
+	bool result = false;
 
-	if ( pChip == NULL || pState == NULL || pState->gpiowatch == false ||
-	     pChip->pLineRequest == NULL )
+	if ( ( pChip != NULL ) && ( pState != NULL ) &&
+	     ( pState->gpiowatch == true ) && ( pChip->pLineRequest != NULL ) )
 	{
-		return false;
-	}
-
-	for ( pGPIO = pChip->pFirstLine; pGPIO != NULL; pGPIO = pGPIO->pNext )
-	{
-		if ( ( pGPIO->in_kernel_request == true ) &&
-		     ( pGPIO->edge_configured == true ) )
+		for ( pGPIO = pChip->pFirstLine;
+		      ( pGPIO != NULL ) && ( result == false );
+		      pGPIO = pGPIO->pNext )
 		{
-			return true;
+			if ( ( pGPIO->in_kernel_request == true ) &&
+			     ( pGPIO->edge_configured == true ) )
+			{
+				result = true;
+			}
 		}
 	}
 
-	return false;
+	return result;
 }
 
-static int FinalizeChipGPIORequest( GPIOChip *pGPIOChip, GPIOCtrlState *pState )
+/*==========================================================================*/
+/*  FinalizeChipGPIORequest                                                 */
+/*!
+    Finalize the GPIO line request for a chip
+
+    The FinalizeChipGPIORequest function builds and issues a single
+    libgpiod v2 line request for all eligible lines on the specified
+    chip.  Line settings (direction, bias, drive, edge detection,
+    active-low, output value) are configured per-line using
+    gpiod_line_settings.  The resulting gpiod_line_request handle
+    is stored in pGPIOChip->pLineRequest.
+
+    @param[in]
+        pGPIOChip
+            pointer to the GPIO chip whose lines are to be requested
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state
+
+    @retval EOK the request was issued successfully (or no lines
+            needed requesting)
+    @retval EINVAL invalid arguments
+    @retval ENOMEM unable to allocate line or request config
+    @retval EIO gpiod_chip_request_lines failed
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    30-Apr-2026     By: Trevor Monk
+        - created for libgpiod v2 migration
+
+============================================================================*/
+static int FinalizeChipGPIORequest( GPIOChip *pGPIOChip,
+                                    GPIOCtrlState *pState )
 {
-	struct gpiod_line_config *line_cfg;
-	struct gpiod_request_config *req_cfg;
+	struct gpiod_line_config *line_cfg = NULL;
+	struct gpiod_request_config *req_cfg = NULL;
+	struct gpiod_line_settings *settings;
 	GPIO *pGPIO;
 	int rc;
 	unsigned int offset;
-	int result = EOK;
+	int out_val;
+	int result = EINVAL;
 	int added = 0;
 
-	if ( ( pGPIOChip == NULL ) || ( pGPIOChip->pChip == NULL ) ||
-	     ( pState == NULL ) )
+	if ( ( pGPIOChip != NULL ) && ( pGPIOChip->pChip != NULL ) &&
+	     ( pState != NULL ) )
 	{
-		return EINVAL;
-	}
+		line_cfg = gpiod_line_config_new( );
+		req_cfg = gpiod_request_config_new( );
+		if ( ( line_cfg != NULL ) && ( req_cfg != NULL ) )
+		{
+			gpiod_request_config_set_consumer( req_cfg, pState->service );
 
-	line_cfg = gpiod_line_config_new( );
-	req_cfg = gpiod_request_config_new( );
-	if ( ( line_cfg == NULL ) || ( req_cfg == NULL ) )
-	{
+			for ( pGPIO = pGPIOChip->pFirstLine;
+			      pGPIO != NULL;
+			      pGPIO = pGPIO->pNext )
+			{
+				pGPIO->in_kernel_request = false;
+				if ( GPIOShouldRequest( pGPIO, pState ) == false )
+				{
+					continue;
+				}
+
+				settings = gpiod_line_settings_new( );
+				if ( settings == NULL )
+				{
+					continue;
+				}
+
+				gpiod_line_settings_set_direction( settings,
+				                                   pGPIO->direction );
+				if ( pGPIO->direction == GPIOD_LINE_DIRECTION_OUTPUT )
+				{
+					out_val = pGPIO->value;
+					if ( pGPIO->PWM == true )
+					{
+						out_val = 0;
+					}
+					(void)gpiod_line_settings_set_output_value(
+						settings,
+						( out_val != 0 )
+						    ? GPIOD_LINE_VALUE_ACTIVE
+						    : GPIOD_LINE_VALUE_INACTIVE );
+				}
+
+				gpiod_line_settings_set_active_low( settings,
+				                                    pGPIO->active_low );
+
+				if ( pGPIO->line_bias != GPIOD_LINE_BIAS_AS_IS )
+				{
+					(void)gpiod_line_settings_set_bias(
+						settings, pGPIO->line_bias );
+				}
+
+				if ( pGPIO->line_drive != GPIOD_LINE_DRIVE_PUSH_PULL )
+				{
+					(void)gpiod_line_settings_set_drive(
+						settings, pGPIO->line_drive );
+				}
+
+				if ( ( pGPIO->direction == GPIOD_LINE_DIRECTION_INPUT ) &&
+				     ( pGPIO->edge_configured == true ) )
+				{
+					(void)gpiod_line_settings_set_edge_detection(
+						settings, pGPIO->line_edge );
+				}
+
+				offset = (unsigned int)pGPIO->line_num;
+				rc = gpiod_line_config_add_line_settings(
+					line_cfg, &offset, 1, settings );
+				gpiod_line_settings_free( settings );
+				if ( rc == 0 )
+				{
+					pGPIO->in_kernel_request = true;
+					added++;
+				}
+			}
+
+			if ( added > 0 )
+			{
+				pGPIOChip->pLineRequest =
+					gpiod_chip_request_lines( pGPIOChip->pChip,
+					                          req_cfg, line_cfg );
+				if ( pGPIOChip->pLineRequest == NULL )
+				{
+					syslog( LOG_ERR,
+					        "FinalizeChipGPIORequest: %s",
+					        strerror( errno ) );
+					result = EIO;
+				}
+				else
+				{
+					result = EOK;
+				}
+			}
+			else
+			{
+				result = EOK;
+			}
+		}
+		else
+		{
+			result = ENOMEM;
+		}
+
 		if ( line_cfg != NULL )
 		{
 			gpiod_line_config_free( line_cfg );
@@ -306,88 +500,6 @@ static int FinalizeChipGPIORequest( GPIOChip *pGPIOChip, GPIOCtrlState *pState )
 		{
 			gpiod_request_config_free( req_cfg );
 		}
-		return ENOMEM;
-	}
-
-	gpiod_request_config_set_consumer( req_cfg, pState->service );
-
-	for ( pGPIO = pGPIOChip->pFirstLine; pGPIO != NULL; pGPIO = pGPIO->pNext )
-	{
-		struct gpiod_line_settings *settings;
-
-		pGPIO->in_kernel_request = false;
-		if ( GPIOShouldRequest( pGPIO, pState ) == false )
-		{
-			continue;
-		}
-
-		settings = gpiod_line_settings_new( );
-		if ( settings == NULL )
-		{
-			continue;
-		}
-
-		gpiod_line_settings_set_direction( settings, pGPIO->direction );
-		if ( pGPIO->direction == GPIOD_LINE_DIRECTION_OUTPUT )
-		{
-			int out_val = pGPIO->value;
-
-			if ( pGPIO->PWM == true )
-			{
-				out_val = 0;
-			}
-			(void)gpiod_line_settings_set_output_value(
-				settings,
-				( out_val != 0 ) ? GPIOD_LINE_VALUE_ACTIVE
-					       : GPIOD_LINE_VALUE_INACTIVE );
-		}
-
-		gpiod_line_settings_set_active_low( settings, pGPIO->active_low );
-
-		if ( pGPIO->line_bias != GPIOD_LINE_BIAS_AS_IS )
-		{
-			(void)gpiod_line_settings_set_bias( settings, pGPIO->line_bias );
-		}
-
-		if ( pGPIO->line_drive != GPIOD_LINE_DRIVE_PUSH_PULL )
-		{
-			(void)gpiod_line_settings_set_drive( settings, pGPIO->line_drive );
-		}
-
-		if ( ( pGPIO->direction == GPIOD_LINE_DIRECTION_INPUT ) &&
-		     ( pGPIO->edge_configured == true ) )
-		{
-			(void)gpiod_line_settings_set_edge_detection( settings,
-								    pGPIO->line_edge );
-		}
-
-		offset = (unsigned int)pGPIO->line_num;
-		rc = gpiod_line_config_add_line_settings( line_cfg, &offset, 1,
-							  settings );
-		gpiod_line_settings_free( settings );
-		if ( rc == 0 )
-		{
-			pGPIO->in_kernel_request = true;
-			added++;
-		}
-	}
-
-	if ( added == 0 )
-	{
-		gpiod_line_config_free( line_cfg );
-		gpiod_request_config_free( req_cfg );
-		return EOK;
-	}
-
-	pGPIOChip->pLineRequest =
-		gpiod_chip_request_lines( pGPIOChip->pChip, req_cfg, line_cfg );
-	gpiod_request_config_free( req_cfg );
-	gpiod_line_config_free( line_cfg );
-
-	if ( pGPIOChip->pLineRequest == NULL )
-	{
-		syslog( LOG_ERR, "FinalizeChipGPIORequest: %s", strerror( errno ) );
-		result = EIO;
 	}
 
 	return result;
@@ -567,87 +679,130 @@ static int WaitGPIOEvent( GPIOCtrlState *pState )
 	GPIOChip *pChip;
 	struct pollfd pfds[64];
 	GPIOChip *chips[64];
+	struct gpiod_edge_event *ev;
 	int n;
 	int i;
 	int pr;
 	size_t cap;
 	int num_ev;
 	size_t ev_idx;
+	int result = EINVAL;
 
-	if ( pState == NULL )
+	if ( pState != NULL )
 	{
-		return EINVAL;
-	}
-
-	if ( pState->pEdgeBuf == NULL )
-	{
-		pState->pEdgeBuf = gpiod_edge_event_buffer_new( 32 );
 		if ( pState->pEdgeBuf == NULL )
 		{
-			return ENOMEM;
+			pState->pEdgeBuf = gpiod_edge_event_buffer_new( 32 );
+		}
+
+		if ( pState->pEdgeBuf == NULL )
+		{
+			result = ENOMEM;
+		}
+		else
+		{
+			n = 0;
+			for ( pChip = pState->pFirstGPIOChip;
+			      pChip != NULL;
+			      pChip = pChip->pNext )
+			{
+				if ( ChipParticipatesInEdgePoll( pChip, pState ) == false )
+				{
+					continue;
+				}
+				if ( n >= (int)( sizeof( pfds ) / sizeof( pfds[0] ) ) )
+				{
+					break;
+				}
+				pfds[n].fd = gpiod_line_request_get_fd(
+					pChip->pLineRequest );
+				pfds[n].events = POLLIN;
+				pfds[n].revents = 0;
+				chips[n] = pChip;
+				n++;
+			}
+
+			if ( n == 0 )
+			{
+				result = EOK;
+			}
+			else
+			{
+				pr = poll( pfds, (nfds_t)n, -1 );
+				if ( pr < 0 )
+				{
+					result = errno;
+				}
+				else
+				{
+					cap = gpiod_edge_event_buffer_get_capacity(
+						pState->pEdgeBuf );
+					for ( i = 0; i < n; i++ )
+					{
+						if ( ( pfds[i].revents & POLLIN ) == 0 )
+						{
+							continue;
+						}
+						num_ev = gpiod_line_request_read_edge_events(
+							chips[i]->pLineRequest,
+							pState->pEdgeBuf, cap );
+						if ( num_ev < 0 )
+						{
+							continue;
+						}
+						num_ev = (int)
+							gpiod_edge_event_buffer_get_num_events(
+								pState->pEdgeBuf );
+						for ( ev_idx = 0;
+						      ev_idx < (size_t)num_ev;
+						      ev_idx++ )
+						{
+							ev = gpiod_edge_event_buffer_get_event(
+								pState->pEdgeBuf, ev_idx );
+							(void)HandleGPIOEdgeEvent(
+								pState, chips[i], ev );
+						}
+					}
+					result = EOK;
+				}
+			}
 		}
 	}
 
-	n = 0;
-	for ( pChip = pState->pFirstGPIOChip; pChip != NULL; pChip = pChip->pNext )
-	{
-		if ( ChipParticipatesInEdgePoll( pChip, pState ) == false )
-		{
-			continue;
-		}
-		if ( n >= (int)( sizeof( pfds ) / sizeof( pfds[0] ) ) )
-		{
-			break;
-		}
-		pfds[n].fd = gpiod_line_request_get_fd( pChip->pLineRequest );
-		pfds[n].events = POLLIN;
-		pfds[n].revents = 0;
-		chips[n] = pChip;
-		n++;
-	}
-
-	if ( n == 0 )
-	{
-		return EOK;
-	}
-
-	pr = poll( pfds, (nfds_t)n, -1 );
-	if ( pr < 0 )
-	{
-		return errno;
-	}
-
-	cap = gpiod_edge_event_buffer_get_capacity( pState->pEdgeBuf );
-	for ( i = 0; i < n; i++ )
-	{
-		if ( ( pfds[i].revents & POLLIN ) == 0 )
-		{
-			continue;
-		}
-		num_ev = gpiod_line_request_read_edge_events(
-			chips[i]->pLineRequest, pState->pEdgeBuf, cap );
-		if ( num_ev < 0 )
-		{
-			continue;
-		}
-		num_ev = (int)gpiod_edge_event_buffer_get_num_events(
-			pState->pEdgeBuf );
-		for ( ev_idx = 0; ev_idx < (size_t)num_ev; ev_idx++ )
-		{
-			struct gpiod_edge_event *ev = gpiod_edge_event_buffer_get_event(
-				pState->pEdgeBuf, ev_idx );
-
-			(void)HandleGPIOEdgeEvent( pState, chips[i], ev );
-		}
-	}
-
-	return EOK;
+	return result;
 }
 
 /*==========================================================================*/
 /*  HandleGPIOEdgeEvent                                                     */
 /*!
     Handle a GPIO input edge event (libgpiod v2)
+
+    The HandleGPIOEdgeEvent function processes a single edge event
+    received from the gpiod_edge_event_buffer.  It determines the
+    new value based on the event type (rising = 1, falling = 0)
+    and updates the associated variable via the variable server.
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state
+
+    @param[in]
+        pChip
+            pointer to the GPIO chip that generated the event
+
+    @param[in]
+        ev
+            pointer to the edge event from the event buffer
+
+    @retval EOK the event was handled successfully
+    @retval ENOENT no variable found for the event line offset
+    @retval EINVAL invalid arguments
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    30-Apr-2026     By: Trevor Monk
+        - created for libgpiod v2 migration
 
 ============================================================================*/
 static int HandleGPIOEdgeEvent( GPIOCtrlState *pState,
@@ -902,7 +1057,7 @@ static GPIOChip *CreateChip( JNode *pNode, GPIOCtrlState *pState )
                 }
                 else
                 {
-                    /* cloud not allocate memory for the GPIO Chip */
+                    /* could not allocate memory for the GPIO Chip */
                     /* clean up resources used by the chip */
                     gpiod_chip_close( pChip );
                 }
@@ -1873,7 +2028,35 @@ static GPIO *FindGPIO( GPIOCtrlState *pState, VAR_HANDLE hVar )
 /*============================================================================*/
 /*  FindVarByLine                                                            */
 /*!
-    Find a variable associated with a chip line offset (libgpiod v2)
+    Find a variable handle by chip and line offset
+
+    The FindVarByLine function searches the GPIO line list for
+    the specified chip and returns the variable handle associated
+    with the given line offset.  This is used when processing
+    edge events to map a kernel-reported line offset back to its
+    associated variable.
+
+    @param[in]
+        pState
+            pointer to the GPIO controller state containing
+            the list of GPIO chips
+
+    @param[in]
+        pForChip
+            pointer to the chip to search within
+
+    @param[in]
+        offset
+            the line offset to search for
+
+    @retval VAR_HANDLE handle of the matching variable
+    @retval VAR_INVALID if no matching line was found
+
+*//*
+    REVISION HISTORY:
+
+    Version: 1.0    30-Apr-2026     By: Trevor Monk
+        - created for libgpiod v2 migration
 
 ==============================================================================*/
 static VAR_HANDLE FindVarByLine( const GPIOCtrlState *pState,
@@ -1883,25 +2066,27 @@ static VAR_HANDLE FindVarByLine( const GPIOCtrlState *pState,
 	VAR_HANDLE hVar = VAR_INVALID;
 	const GPIOChip *pGPIOChip;
 	const GPIO *pGPIO;
+	bool found = false;
 
-	if ( ( pState == NULL ) || ( pForChip == NULL ) )
+	if ( ( pState != NULL ) && ( pForChip != NULL ) )
 	{
-		return VAR_INVALID;
-	}
-
-	for ( pGPIOChip = pState->pFirstGPIOChip; pGPIOChip != NULL;
-	      pGPIOChip = pGPIOChip->pNext )
-	{
-		if ( pGPIOChip != pForChip )
+		for ( pGPIOChip = pState->pFirstGPIOChip;
+		      ( pGPIOChip != NULL ) && ( found == false );
+		      pGPIOChip = pGPIOChip->pNext )
 		{
-			continue;
-		}
-		for ( pGPIO = pGPIOChip->pFirstLine; pGPIO != NULL;
-		      pGPIO = pGPIO->pNext )
-		{
-			if ( (unsigned int)pGPIO->line_num == offset )
+			if ( pGPIOChip != pForChip )
 			{
-				return pGPIO->hVar;
+				continue;
+			}
+			for ( pGPIO = pGPIOChip->pFirstLine;
+			      ( pGPIO != NULL ) && ( found == false );
+			      pGPIO = pGPIO->pNext )
+			{
+				if ( (unsigned int)pGPIO->line_num == offset )
+				{
+					hVar = pGPIO->hVar;
+					found = true;
+				}
 			}
 		}
 	}
@@ -2641,6 +2826,8 @@ static void *PWMThread( void *arg )
             }
         }
     }
+
+    return NULL;
 }
 
 
